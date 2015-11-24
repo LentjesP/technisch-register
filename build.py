@@ -1,260 +1,89 @@
 #!/usr/bin/python
 
 from fs.osfs import OSFS
-from fs.errors import ResourceNotFoundError
-from bs4 import BeautifulSoup as BS
-from json import load, dumps
-from os import chmod, environ
-from stat import S_IRWXO, S_IRWXG, S_IRWXU
-from subprocess import call
+from json import load, dumps, loads
+from utils import run, set_repeat, get_repeat, cleanup
+from sys import stdin, exit
 import codecs
 import time
+import webpages
+import backend
 
-def create_standard_title(title, description):
-    title = '''
-        <h2>%s</h2>
-        <p>%s</p>
-        ''' % (title, description)
+source = 'repos'
+destination_temp = 'register2'
+destination = 'register'
 
-    # use python's built-in parser which skips
-    # creation of html and body tags
-    return BS(title, 'html.parser')
+def build_staging(source, destination_temp, destination):
+    set_repeat('none')
 
-def create_substandard_title(standard, artifact, title):
-    title = '''
-        <p><i class="fa fa-file-o"></i>
-            <span style='margin-left: 25px'>
-                <a href="http://register.geostandaarden.nl/%s/%s">%s</a>
-            </span>
-        </p> ''' % (artifact, standard, title)
-
-    return BS(title, 'html.parser')
-
-def create_substandard_description(substandard):
-    summary ='''
-        <p>
-            <span style='margin-left:37px; width: 100%%'>%s</span>
-        </p>
-        ''' % substandard['beschrijving']
-
-    return BS(summary, 'html.parser')
-
-def create_standard_webpage(standard, artifacts):
-    # builds each standard's overview page
-    # e.g. http://register.geostandaarden.nl/imgeo/
-
-    # load standard HTML template
-    with open('web/templates/standard.html', 'r') as f:
-        html = BS(f)
-
-    # construct title
-    title = create_standard_title(standard['title'], standard['beschrijving'])
-    
-    # add to #title div
-    el_title = html.find(id="title")
-
-    # fetch #container from template
-    el_container = html.find(id="container")
-
-    # append title
-    el_title.append(title)
-
-    with codecs.open('descriptions.json', encoding='utf8') as f:
-        descriptions = load(f)
-
-    # iterate over all artifacts i.e. informatiemodel, gmlapplicatieschema, regels, etc.
-    for artifact in artifacts:
-        # create title of each sub standard
-        title = create_substandard_title(standard['id'], artifact, descriptions[artifact]['titel'])
-        el_container.append(title)
-
-        # create description of each standard
-        description = create_substandard_description(descriptions[artifact])
-        el_container.append(description)
-
-    return html.prettify()
-
-def create_overview_entry(standard, description):
-    # url = "http://register.geostandaarden.nl"
-    url = "."
-    overview = '''
-        <p>
-            <i class="fa fa-file"></i>
-            <span style='margin-left: 25px'>
-                <a href="%s/%s/index.html">%s</a>
-            </span>
-        </p>
-        <p><span style='margin-left:37px; width: 100%%'>%s</span></p>
-            ''' % (url, standard, standard.upper(), description)
-
-    return BS(overview, 'html.parser')
-
-def create_overview_page(standards, source, destination):
-    print 'Creating overview page...'
-
-    # open overview page template
-    with codecs.open('web/templates/overview.html', 'r', encoding='utf8') as f:
-        html = BS(f)
-
-    el_container = html.find(id='leftcolumn')
-
-    for standard in standards:
-        overview = create_overview_entry(standard['id'], standard['beschrijving'])
-        el_container.append(overview)
-
-    with codecs.open('%s/index.html' % destination, 'w', encoding='utf8') as f:
-        f.write(html.prettify())
-        #OSFS('./').copydir('../web/assets', '%s/assets' % destination)
-        call('cp -r web/assets %s/assets' % destination, shell=True)
-
-        print 'Done!'
-
-def build_folders(source, destination, standards, root):
-    print "Building register..."
-
-    source_fs = OSFS(source)
-
-    # iterate over all standards in source directory
-    for standard in standards:
-        print "Processing %s ... " % standard['id']
-        standard_fs = source_fs.opendir(standard['id'])
-
-        # list all sub standards of a standard
-        artifacts = standard_fs.listdir(dirs_only=True)
-        if '.git' in artifacts: artifacts.remove(".git")
-
-        for artifact in artifacts:
-            # check whether artifact folder exists in destination 
-            if root.exists('%s/%s' % (destination, artifact)) == False:
-                root.makedir('%s/%s' % (destination, artifact))
-                
-            # copy standard folders from source to destination in desired structure
-            root.copydir('%s/%s/%s' % (source, standard['id'], artifact),  '%s/%s/%s' % (destination, artifact, standard['id']))
-
-        # create standard HTML page
-        html = create_standard_webpage(standard, artifacts)
-
-        # check whether standard folder exists in register root
-        if root.exists('%s/%s' % (destination, standard['id'])) == False:
-            root.makedir('%s/%s' % (destination, standard['id']))
-        
-        # write standard HTML page to register/standard/index.html
-        with codecs.open('%s/%s/index.html' % (destination, standard['id']), 'w', encoding='utf8') as f:
-            f.write(html)
-
-def fetch_repos(root, destination, repos):
-    print "Fetching repositories..."
-
-    for repo in repos:
-        print "Cloning %s in repos/%s" % (repo['url'], repo['id'])
-        # explicitely create dir as implicit cration fails on server
-        root.makedir('%s/%s' % (destination, repo['id']))
-        call('git clone %s repos/%s' % (repo['url'], repo['id']), shell=True)
-
-    #TODO: git pull additions into existing repos, clone new ones
-
-
-def run(status):
-    # environ['TR_RUNNING'] = 'true'
-
-    status['running'] = True
-    with open('status.json', 'w') as f:
-        f.write(dumps(status))
-
-    source = 'repos'
-    destination = 'register2'
+    cleanup(source, destination_temp)
 
     root = OSFS('./') # 'c:\Users\<login name>' on Windows
-    
-    try:
-        print "removing %s" % source
-        # removedir function cannot deal with protected
-        # files in each repo's .git folder
-        call('rm -rf %s' % source, shell=True)
-    except ResourceNotFoundError: 
-        print "Failed to remove %s..." % source
+    # root.makedir(source, allow_recreate=True)
+    root.makedir(destination_temp, allow_recreate=True)
 
-    # try:
-    #   print "removing %s" % destination
-    #   root.removedir(destination, force=True)
-    # except ResourceNotFoundError:
-    #   print "Failed to remove %s..." % destination
-    
-    root.makedir(source)
-    # chmod(source, S_IRWXU | S_IRWXG | S_IRWXO)
-    root.makedir(destination)
-    # chmod(destination, S_IRWXU | S_IRWXG | S_IRWXO)
-
+    # TODO: use this approach to include standards that are not managed on GitHub
     #standards = OSFS(source).listdir(dirs_only=True)
     with open('repos.json') as f:
         standards = load(f)
     
-    fetch_repos(root, destination, standards)
-    build_folders(source, destination, standards, root)
-    create_overview_page(standards, source, destination)
-
-    print 'Copying register to staging...'
-
-    call('rm -rf ../register/staging', shell=True)
-
-
-    call('mv %s ../register/staging' % destination, shell=True)
-    # root.copydir(destination, '../register/staging')
-    # root.removedir(destination, force=True)
+    backend.fetch_repos(root, destination_temp, standards, source)
+    backend.build_folders(source, destination_temp, standards, root)
+    webpages.create_overview_page(standards, source, destination_temp)
+    backend.create_staging(destination_temp, destination)
     
-    # call('rm -rf %s' % source, shell=True)
-    call('chmod -R a+rx ../register/staging', shell=True)
-    # root.removedir(source, force=True)
-
-    with open('status.json') as f:
-        status = load(f)
-
-    if status['again'] == True:
-        status['again'] = False
-
-        with open('status.json', 'w') as f:
-            f.write(dumps(status))
-
-        print "Running once more..."
-        run(status)
-    else:
-        status['running'] = False
-        with open('status.json', 'w') as f:
-            f.write(dumps(status))
-
-    # if environ['TR_AGAIN'] == 'true':
-    #   environ['TR_AGAIN'] = 'false'
-
-    #   print "Running once more..."
-    #   run()
-    # else:
-    #   environ['TR_RUNNING'] = 'false'
+    print "Done!"
 
 #if __name__ == "__main__":
-with open('status.json') as f:
-    status = load(f)
+
+# TODO: set running to false when script fails
+# TODO: remove working dirs
+# TODO: create a cleanup function to store above actions
 
 print "Content-Type: text/html"
 print 
 print "Running sync script..."
 
-if status['running'] == False:
-    status['running'] = True
-    run(status)
+# read release type from GitHub hook
+# payload = loads(stdin.read())
+payload = load(stdin)
+try: 
+    action = payload['action']
+except KeyError:
+    print 'This payload does not carry a release... aborting.'
+    exit()
 
-elif status['running'] == True:
-    status['again'] = True
+prerelease = payload['release']['prerelease']
 
-    with open('status.json', 'w') as f:
-        f.write(dumps(status))
+if action == 'published':
+    if prerelease == True:
+        if run():
+            print "Building staging..."
+            build_staging(source, destination_temp, destination)
+        else:
+            print "Script is already running... setting repeat flag to staging..."
+            set_repeat('staging')
+            exit()
 
-print "Queue: %s" % status['again']
+    else:
+        if run():
+            print "Building production..."
+            build_staging(source, destination_temp, destination)
+            backend.put_in_production(destination)
+        else:
+            print "Script is already running... setting repeat flag to production..."
+            set_repeat('production')
+            exit()
 
-    # if 'TR_RUNNING' not in environ:
-    #   environ['TR_RUNNING'] = 'true'
-    #   run()
-    # elif environ['TR_RUNNING'] == 'false':
-    #   environ['TR_RUNNING'] = 'true'
-    #   run()
-    # elif environ['TR_RUNNING'] == 'true':
-    #   environ['TR_AGAIN'] = 'true'
+repeat = get_repeat()
+
+while repeat != 'none':
+    if repeat == 'staging':
+        print "Repeating staging..."
+        build_staging(source, destination_temp, destination)
+    elif repeat == 'production':
+        print "Repeating production..."
+        build_staging(source, destination_temp, destination)
+        backend.put_in_production(destination)
+
+    repeat = get_repeat()
